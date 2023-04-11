@@ -1,0 +1,16 @@
+{
+  "type": "postgres",
+  "host": "localhost",
+  "port": 5432,
+  "username": "postgres",
+  "password": "root",
+  "database": "flowstation",
+  "logging": false,
+  "entities": ["dist/**/**/*.entity.js"],
+  "migrations": ["dist/migrations/**/*.js"],
+  "subscribers": ["src/subscriber/**/*.ts"],
+  "cli": {
+    "migrationsDir": "dist/migrations",
+    "subscribersDir": "src/subscriber"
+  }
+}

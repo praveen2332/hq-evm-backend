@@ -1,0 +1,115 @@
+name: Deploy AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      services:
+        description: 'Service need to deploy [aws, backend, both]'
+        required: true
+        default: 'backend'
+      
+      environment:
+        description: 'Environment need to deploy [dev]'
+        required: true
+        default: 'dev'
+
+jobs:
+  check_deployment:
+    runs-on: ubuntu-latest
+    name: Check Deployment
+    outputs:
+      deployment_status: ${{ steps.deployment_status.outputs.defined }}
+    steps:
+      - id: deployment_status
+        env:
+          service: ${{ github.event.inputs.services }}
+        if: "${{ env.service == 'aws' }}"
+        run: echo "::set-output name=defined::true"
+
+  deploy_backend:
+    runs-on: ubuntu-latest
+    needs:
+      - check_deployment
+    if: needs.check_deployment.outputs.deployment_status != 'true'
+    name: DEPLOY AWS AND BACKEND
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_{0}', github.event.inputs.environment)] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_KEY_{0}', github.event.inputs.environment)]  }}
+          aws-region: ap-southeast-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR backend
+        id: build-image-backend
+        env: 
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets[format('ECR_REPOSITORY_BACKEND_{0}', github.event.inputs.environment)]  }}
+          IMAGE_TAG: ${{ github.sha }}
+          ENV: ${{ github.event.inputs.environment }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f infra/Docker/Dockerfile .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        
+      - name: Terraform update
+        env:
+          ACCESS_KEY: ${{ secrets[format('AWS_ACCESS_KEY_{0}', github.event.inputs.environment)] }}
+          SECRET_KEY: ${{ secrets[format('AWS_SECRET_KEY_{0}', github.event.inputs.environment)] }}
+          PASS_DB: ${{ secrets[format('PASSWORD_DATABASE_{0}', github.event.inputs.environment)] }}
+          NAME_DB: ${{ secrets[format('NAME_DATABASE_{0}', github.event.inputs.environment)] }}
+          USER_DB: ${{ secrets[format('USER_NAME_DATABASE_{0}', github.event.inputs.environment)] }}
+          IMAGE_BE: ${{ steps.build-image-backend.outputs.image }}
+        run: |
+          cd infra/
+          bash update_vars.sh
+          terraform init
+          terraform plan
+          terraform apply -auto-approve
+  deploy_aws:
+    runs-on: ubuntu-latest
+    needs:
+      - check_deployment
+    if: needs.check_deployment.outputs.deployment_status == 'true'
+    name: DEPLOY AWS
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_{0}', github.event.inputs.environment)] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_KEY_{0}', github.event.inputs.environment)]  }}
+          aws-region: ap-southeast-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+      
+      - name: Terraform apply
+        env:
+          ACCESS_KEY: ${{ secrets[format('AWS_ACCESS_KEY_{0}', github.event.inputs.environment)] }}
+          SECRET_KEY: ${{ secrets[format('AWS_SECRET_KEY_{0}', github.event.inputs.environment)] }}
+          PASS_DB: ${{ secrets[format('PASSWORD_DATABASE_{0}', github.event.inputs.environment)] }}
+          NAME_DB: ${{ secrets[format('NAME_DATABASE_{0}', github.event.inputs.environment)] }}
+          USER_DB: ${{ secrets[format('USER_NAME_DATABASE_{0}', github.event.inputs.environment)] }}
+          TASK_BE: ${{ secrets[format('TASK_DEFINITION_BACKEND_{0}', github.event.inputs.environment)] }}
+        run: |
+          cd infra/
+          export IMAGE_BE=$(aws ecs describe-task-definition --task-definition $TASK_BE --query taskDefinition.containerDefinitions[0].image)
+          bash update_vars.sh
+          terraform init
+          terraform plan
+          terraform apply -auto-approve

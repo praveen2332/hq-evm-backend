@@ -1,0 +1,63 @@
+name: Deploy Backend Production AWS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/aws_backend_prod.yml'
+      - 'infra/**'
+
+jobs:
+  deploy_backend:
+    runs-on: ubuntu-latest
+    name: DEPLOY AWS AND BACKEND
+    environment: production
+    env:
+      env_deploy: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY_PROD }}
+          aws-region: ap-southeast-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR backend
+        id: build-image-backend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_BACKEND_PROD }}
+          IMAGE_TAG: ${{ github.sha }}
+          ENV: production
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f infra/Docker/Dockerfile .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+
+      - name: Terraform update
+        env:
+          ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_PROD }}
+          SECRET_KEY: ${{ secrets.AWS_SECRET_KEY_PROD }}
+          PASS_DB: ${{ secrets.PASSWORD_DATABASE_PROD }}
+          NAME_DB: ${{ secrets.NAME_DATABASE_PROD }}
+          USER_DB: ${{ secrets.USER_NAME_DATABASE_PROD }}
+          TERRAFORM_STATE_BUCKET_NAME: ${{ secrets.TERRAFORM_STATE_BUCKET_NAME_PROD }}
+          IMAGE_BE: ${{ steps.build-image-backend.outputs.image }}
+        run: |
+          cd infra/
+          bash update_vars.sh
+          terraform init -backend-config=./cfbackend.tfvars
+          terraform plan -var="stage_name=prod"
+          terraform apply -var="stage_name=prod" -auto-approve

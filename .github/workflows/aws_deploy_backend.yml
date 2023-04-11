@@ -1,0 +1,130 @@
+name: Deploy Backend To AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: The environment to deploy to [dev, staging, prod]
+        default: "dev"
+        required: true
+      key:
+        description: Key to use for deployment production
+        default: ""
+        required: false
+
+jobs:
+  check_key:
+    name: Check secret KEY
+    runs-on: ubuntu-latest
+    outputs:
+      my-key: ${{ steps.my-key.outputs.defined }}
+    steps:
+      - id: my-key
+        env:
+          MY_KEY: ${{ secrets.DEPLOY_KEY }}
+        if: "${{ env.MY_KEY == github.event.inputs.key }}"
+        run: echo "::set-output name=defined::true"
+
+  deploy_backend:
+    runs-on: ubuntu-latest
+    name: DEPLOY AWS AND BACKEND
+    needs: check_key
+    if: needs.check_key.outputs.my-key == 'true' || github.event.inputs.environment == 'staging' || github.event.inputs.environment == 'dev'
+    environment: ${{ github.event.inputs.environment }}
+    env:
+      env_deploy: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_{0}', github.event.inputs.environment)] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_KEY_{0}', github.event.inputs.environment)]  }}
+          aws-region: ap-southeast-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR backend
+        id: build-image-backend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets[ format('ECR_REPOSITORY_BACKEND_{0}', github.event.inputs.environment)]  }}
+          IMAGE_TAG: ${{ github.sha }}
+          ENV: ${{ secrets[ format('ENV_{0}', github.event.inputs.environment)]  }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f infra/Docker/Dockerfile .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Setup ecs-cli
+        run: |
+          sudo curl -Lo /usr/local/bin/ecs-cli https://amazon-ecs-cli.s3.amazonaws.com/ecs-cli-linux-amd64-latest
+          sudo chmod +x /usr/local/bin/ecs-cli
+          export PATH=$PATH:$HOME/.local/bin
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.2.2
+          terraform_wrapper: false
+
+      - name: Terraform update
+        id: terraform_update
+        env:
+          ACCESS_KEY: ${{ secrets[ format('AWS_ACCESS_KEY_{0}', github.event.inputs.environment)]  }}
+          SECRET_KEY: ${{ secrets[ format('AWS_SECRET_KEY_{0}', github.event.inputs.environment)]  }}
+          PASS_DB: ${{ secrets[ format('PASSWORD_DATABASE_{0}', github.event.inputs.environment)]  }}
+          NAME_DB: ${{ secrets[ format('NAME_DATABASE_{0}', github.event.inputs.environment)]  }}
+          USER_DB: ${{ secrets[ format('USER_NAME_DATABASE_{0}', github.event.inputs.environment)]  }}
+          COINGECKO_API_KEY: ${{ secrets[ format('COINGECKO_API_KEY_{0}', github.event.inputs.environment)]  }}
+          ETHERSCAN_API_KEY: ${{ secrets[ format('ETHERSCAN_API_KEY_{0}', github.event.inputs.environment)]  }}
+          ALCHEMY_INGESTION_API_KEY: ${{ secrets[ format('ALCHEMY_INGESTION_API_KEY_{0}', github.event.inputs.environment)]  }}
+          POLYGONSCAN_API_KEY: ${{ secrets[ format('POLYGONSCAN_API_KEY_{0}', github.event.inputs.environment)]  }}
+          BSCSCAN_API_KEY: ${{ secrets[ format('BSCSCAN_API_KEY_{0}', github.event.inputs.environment)]  }}
+          AWS_S3_BUCKET: ${{ secrets[ format('AWS_S3_BUCKET_{0}', github.event.inputs.environment)]  }}
+          AWS_S3_ACCESS_KEY: ${{ secrets[ format('AWS_S3_ACCESS_KEY_{0}', github.event.inputs.environment)]  }}
+          AWS_S3_KEY_SECRET: ${{ secrets[ format('AWS_S3_KEY_SECRET_{0}', github.event.inputs.environment)]  }}
+          AWS_S3_REGION: ${{ secrets[ format('AWS_S3_REGION_{0}', github.event.inputs.environment)]  }}
+          S3_URL: ${{ secrets[ format('S3_URL_{0}', github.event.inputs.environment)]  }}
+          VAULT_URL: ${{ secrets[ format('VAULT_URL_{0}', github.event.inputs.environment)]  }}
+          VAULT_VERSION: ${{ secrets[ format('VAULT_VERSION_{0}', github.event.inputs.environment)]  }}
+          VAULT_ROLE_ID: ${{ secrets[ format('VAULT_ROLE_ID_{0}', github.event.inputs.environment)]  }}
+          VAULT_SECRET_ID: ${{ secrets[ format('VAULT_SECRET_ID_{0}', github.event.inputs.environment)]  }}
+          VAULT_NAMESPACE: ${{ secrets[ format('VAULT_NAMESPACE_{0}', github.event.inputs.environment)]  }}
+          VAULT_ENV: ${{ secrets[ format('VAULT_ENV_{0}', github.event.inputs.environment)]  }}
+          AUTH0_AUDIENCE: ${{ secrets[ format('AUTH0_AUDIENCE_{0}', github.event.inputs.environment)]  }}
+          AUTH0_ISSUER_URL: ${{ secrets[ format('AUTH0_ISSUER_URL_{0}', github.event.inputs.environment)]  }}
+          PUBLIC_AWS_S3_BUCKET: ${{ secrets[ format('PUBLIC_AWS_S3_BUCKET_{0}', github.event.inputs.environment)]  }}
+          PRIVATE_AWS_S3_BUCKET: ${{ secrets[ format('PRIVATE_AWS_S3_BUCKET_{0}', github.event.inputs.environment)]  }}
+          TERRAFORM_STATE_BUCKET_NAME: ${{ secrets[ format('TERRAFORM_STATE_BUCKET_NAME_{0}', github.event.inputs.environment)]  }}
+          IMAGE_BE: ${{ steps.build-image-backend.outputs.image }}
+          ENV: ${{ secrets[ format('ENV_{0}', github.event.inputs.environment)]  }}
+        run: |
+          cd infra/
+          bash update_vars.sh
+          bash check_deploy.sh
+          source error.txt
+          if [[ $ERROR == "error" ]]
+          then
+            echo "::set-output name=error_deploy::error"
+          else
+            echo "::set-output name=error_deploy::no"
+          fi
+        continue-on-error: true
+
+      - name: Check deployment error
+        env:
+          ERROR_DEPLOYMENT: ${{ steps.terraform_update.outputs.error_deploy }}
+        run: |
+          cat infra/backend.log
+          if [[ $ERROR_DEPLOYMENT == "error" ]]
+          then
+            echo "::error::DEPLOYMENT ERROR"
+            exit 1
+          else
+            echo "DEPLOYMENT SUCCESS"
+          fi
